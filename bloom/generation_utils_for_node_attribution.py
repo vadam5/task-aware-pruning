@@ -35,7 +35,7 @@ class GenerationMixinForNodeAttribution(GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         output_scores: Optional[bool] = None,
-        return_dict_in_generate: Optional[bool] = None,
+        return_dict_in_generate: Optional[bool] = True,
         synced_gpus: Optional[bool] = False,
         output_activations: Optional[bool] = True,
         **model_kwargs,

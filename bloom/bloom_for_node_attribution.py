@@ -142,7 +142,7 @@ class BloomAttentionForNodeAttribution(BloomAttention):
 
 class BloomBlockForNodeAttribution(BloomBlock):
     def __init__(self, config: BloomConfig):
-        super().__init__()
+        super().__init__(config)
         hidden_size = config.hidden_size
 
         self.input_layernorm = LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
@@ -292,7 +292,7 @@ class BloomModelForNodeAttribution(BloomModel):
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
         
-        #transformer_activations["word_embeddings"] = inputs_embeds # For node attribution
+        transformer_activations["word_embeddings"] = inputs_embeds # For node attribution
         hidden_states = self.word_embeddings_layernorm(inputs_embeds)
         transformer_activations["word_embeddings_layernorm"] = hidden_states # For node attribution
         
@@ -360,7 +360,7 @@ class BloomModelForNodeAttribution(BloomModel):
                     alibi=alibi,
                 )
             
-            layer_activations[i] = block_activations # For node attribution
+            layer_activations[str(i)] = block_activations # For node attribution
             
             hidden_states = outputs[0]
             if use_cache is True:
