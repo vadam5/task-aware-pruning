@@ -61,19 +61,27 @@ class BloomAttentionForNodeAttribution(BloomAttention):
 
         # 3 x [batch_size, seq_length, num_heads, head_dim]
         (query_layer, key_layer, value_layer) = self._split_heads(fused_qkv)
-
+        
+        
         batch_size, q_length, _, _ = query_layer.shape
 
         query_layer = query_layer.transpose(1, 2).reshape(batch_size * self.num_heads, q_length, self.head_dim)
         key_layer = key_layer.permute(0, 2, 3, 1).reshape(batch_size * self.num_heads, self.head_dim, q_length)
         value_layer = value_layer.transpose(1, 2).reshape(batch_size * self.num_heads, q_length, self.head_dim)
         if layer_past is not None:
+            activations["key_pre_past_concat"] = key_layer
+            activations["value_pre_past_concat"] = value_layer
+            
             past_key, past_value = layer_past
             # concatenate along seq_length dimension:
             #  - key: [batch_size * self.num_heads, head_dim, kv_length]
             #  - value: [batch_size * self.num_heads, kv_length, head_dim]
             key_layer = torch.cat((past_key, key_layer), dim=2)
             value_layer = torch.cat((past_value, value_layer), dim=1)
+        
+        activations["query_layer"] = query_layer
+        activations["key_layer"] = key_layer
+        activations["value_layer"] = value_layer
 
         _, _, kv_length = key_layer.shape
 
@@ -90,6 +98,8 @@ class BloomAttentionForNodeAttribution(BloomAttention):
             beta=self.beta,
             alpha=self.inv_norm_factor,
         )
+        
+        activations["query_key_matmul"] = matmul_result
 
         # change view to [batch_size, num_heads, q_length, kv_length]
         attention_scores = matmul_result.view(batch_size, self.num_heads, q_length, kv_length)
@@ -100,6 +110,7 @@ class BloomAttentionForNodeAttribution(BloomAttention):
         if input_dtype == torch.float16:
             attention_scores = attention_scores.to(torch.float)
         attn_weights = torch.masked_fill(attention_scores, attention_mask, torch.finfo(attention_scores.dtype).min)
+        activations["query_key_attn_weights"] = attn_weights
         attention_probs = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(input_dtype)
 
         # [batch_size, num_heads, q_length, kv_length]
@@ -110,12 +121,15 @@ class BloomAttentionForNodeAttribution(BloomAttention):
 
         # change view [batch_size x num_heads, q_length, kv_length]
         attention_probs_reshaped = attention_probs.view(batch_size * self.num_heads, q_length, kv_length)
+        activations["attention_probs_reshaped"] = attention_probs_reshaped
 
         # matmul: [batch_size * num_heads, q_length, head_dim]
         context_layer = torch.bmm(attention_probs_reshaped, value_layer)
+        activations["context_layer"] = context_layer
 
         # change view [batch_size, num_heads, q_length, head_dim]
         context_layer = self._merge_heads(context_layer)
+        activations["merge_heads"] = context_layer
 
         # aggregate results across tp ranks. See here: https://github.com/pytorch/pytorch/issues/76232
         if self.pretraining_tp > 1 and self.slow_but_exact:
@@ -131,7 +145,6 @@ class BloomAttentionForNodeAttribution(BloomAttention):
             activations["dense"] = output_tensor # For node attribution
 
         output_tensor = dropout_add(output_tensor, residual, self.hidden_dropout, self.training)
-        activations["dense_post_dropout"] = output_tensor # For node attribution
 
         outputs = (output_tensor, present)
         if output_attentions:
@@ -178,6 +191,8 @@ class BloomBlockForNodeAttribution(BloomBlock):
             residual = layernorm_output
         else:
             residual = hidden_states
+            
+        activations["residual"] = residual
 
         # Self attention.
         attn_outputs, attn_activations = self.self_attention( # For node attribution
