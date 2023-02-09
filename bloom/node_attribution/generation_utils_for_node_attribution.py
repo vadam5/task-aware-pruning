@@ -19,7 +19,7 @@ from transformers.generation.stopping_criteria import (
 )
 
 
-from outputs import SampleDecoderOnlyOutputForNodeAttribution
+from outputs_for_node_attribution import SampleDecoderOnlyOutputForNodeAttribution
 
 
 class GenerationMixinForNodeAttribution(GenerationMixin):
