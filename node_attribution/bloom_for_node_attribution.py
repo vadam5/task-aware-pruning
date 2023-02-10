@@ -56,8 +56,9 @@ class BloomAttentionForNodeAttribution(BloomAttention):
         output_attentions: bool = False,
     ):
         activations = {} # For node attribution
+        activations["query_key_value"] = hidden_states # For node attribution
         fused_qkv = self.query_key_value(hidden_states)  # [batch_size, seq_length, 3 x hidden_size]
-        activations["query_key_value"] = fused_qkv # For node attribution
+         
 
         # 3 x [batch_size, seq_length, num_heads, head_dim]
         (query_layer, key_layer, value_layer) = self._split_heads(fused_qkv)
