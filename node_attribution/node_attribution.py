@@ -7,7 +7,7 @@ from bloom_for_node_attribution import BloomForCausalLMForNodeAttribution
 from utils import count_params
 
 class NodeAttributor:
-    def __init__(self, model_size, data):
+    def __init__(self, model_size):
         self.load_bloom_model(model_size)
 
     def load_bloom_model(self, model_size):
@@ -34,7 +34,7 @@ class NodeAttributor:
                     Total Param Count (w/ LM Head): {self.total_params:,}"
         )
 
-    def forward_pass(self, model, tokenizer, line):
+    def forward_pass(self, line):
         inputs = self.tokenizer(line, return_tensors="pt")
         outputs = self.model.generate(
             input_ids=inputs["input_ids"], 
@@ -54,7 +54,7 @@ class NodeAttributor:
         contributions = []
         
         for line in data:
-            outputs, _, seq_length = self.forward_pass(self.model, self.tokenizer, line)
+            outputs, _, seq_length = self.forward_pass(line)
             sequence = outputs.sequences[0]
             calculate = SequenceContributionCalculator(
                 model_params = self.model_params,
@@ -68,17 +68,21 @@ class NodeAttributor:
             calculate.lm_head_contributions()
             
             # Transformer blocks
-            for block_id in range(self.num_blocks - 1, -1):
+            for block_id in reversed(range(self.num_blocks)):
+                print(block_id)
                 block_id = str(block_id)
                 calculate.transformer_block_contributions(block_id)
                 
             contributions.append(calculate.contributions)
+        
+        return contributions
             
 class SequenceContributionCalculator:
-    def __init__(self, model_params, model_activations, sequence, num_heads, head_dim):
+    def __init__(self, model_params, model_activations, sequence, seq_length, num_heads, head_dim):
         self.model_params = model_params
         self.model_activations = model_activations
         self.sequence = sequence
+        self.seq_length = seq_length
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.contributions = []
@@ -88,16 +92,19 @@ class SequenceContributionCalculator:
     def lm_head_contributions(self):
         """Final hidden states to token logit contributions"""
         
+        layer_name = "lm_head"
+        param_name = f"{layer_name}.weight"
+        hidden_state_activations = self.model_activations[layer_name].squeeze()
+        
         # weights have shape: (vocab_size x hidden size)
-        lm_head_weights = self.model_params["lm_head.weight"]
+        lm_head_weights = self.model_params[param_name]
 
         # Only care about weights connected to sequence tokens and none of the others
         seq_token_weights = torch.index_select(lm_head_weights, 0, self.sequence[:-1])
-        hidden_state_activations = self.model_activations["transformer"]["ln_f"].squeeze()
-
+    
         # Contribution of layer normed final hidden states to token logit
         contributions = torch.mul(seq_token_weights, hidden_state_activations)
-        self.contributions.append(("lm_head", contributions))
+        self.contributions.append((param_name, contributions))
         self.weight_product_sum = seq_token_weights
         
     def transformer_block_contributions(self, block_id):
@@ -107,7 +114,7 @@ class SequenceContributionCalculator:
     def mlp_contributions(self, block_id):
         # Last MLP layer input contribution to output, delta_x (activations), w_xy (weights)
         sub_block = "mlp"
-        layer_name = "dense_h_to_4h"
+        layer_name = "dense_4h_to_h"
         param_name = f"transformer.h.{block_id}.{sub_block}.{layer_name}.weight"
         mlp_dense_4h_to_h_contributions = self.feed_forward_contributions(
             block_id=block_id,
@@ -118,16 +125,16 @@ class SequenceContributionCalculator:
         self.contributions.append((param_name, mlp_dense_4h_to_h_contributions))
         
         # First MLP layer input contribution to output
-        sub_block = "self_attention"
-        layer_name = "dense"
+        sub_block = "mlp"
+        layer_name = "dense_h_to_4h"
         param_name = f"transformer.h.{block_id}.{sub_block}.{layer_name}.weight"
-        merged_head_to_4h_contributions = self.feed_forward_contributions( 
+        mlp_dense_h_to_4h_contributions = self.feed_forward_contributions( 
             block_id=block_id, 
             sub_block=sub_block,
             layer_name=layer_name, 
             param_name=param_name,
         )
-        self.contributions.append((param_name, merged_head_to_4h_contributions))
+        self.contributions.append((param_name, mlp_dense_h_to_4h_contributions))
         
     def feed_forward_contributions(self, block_id, sub_block, layer_name, param_name):
         # delta_x (activations), w_xy (weights)
@@ -164,6 +171,13 @@ class SequenceContributionCalculator:
         return contributions
     
     def multihead_atten_contributions(self, block_id):
+        # Merged multi-head attention contribution to dense layer outputs
+        sub_block = "self_attention"
+        layer_name = "dense"
+        param_name = f"transformer.h.{block_id}.{sub_block}.{layer_name}.weight"
+        merged_atten_head_contributions = self.feed_forward_contributions(block_id, sub_block, layer_name, param_name)
+        self.contributions.append((param_name, merged_atten_head_contributions))
+        
         value_contributions, value_weight_product_sum = self.value_layer_contributions(block_id)
         query_key_attn_weight_product_sum = self.query_key_atten_contributions(block_id)
         query_contributions, query_weight_product_sum = self.query_layer_contributions(block_id, query_key_attn_weight_product_sum)
@@ -317,6 +331,7 @@ class SequenceContributionCalculator:
 def main(model_size, data):
     attributor = NodeAttributor(model_size)
     contributions = attributor.calc_node_contributions(data)
+    #print(contributions)
     
     
 if __name__ == "__main__":
