@@ -345,15 +345,26 @@ class SequenceContributionCalculator:
         key_contributions = torch.mul(key_activations, key_weight_product_sum)
         
         return key_contributions
-
-
   
 def main(model_size, data):
     attributor = NodeAttributor(model_size)
-    contributions = attributor.calc_node_contributions(data)
+    contributions = attributor.calc_node_contributions(data)[0]
     
-    print(contributions)
+    avg_contribution = {}
+    max_contribution = {}
     
+    # Get average and max contributions for each node over the whole sequence
+    for layer in contributions:
+        layer_name, full_seq_contributions = layer
+        avg = torch.mean(full_seq_contributions.squeeze(), 0)
+        max = torch.max(full_seq_contributions.squeeze(), 0).values
+        
+        avg_contribution[layer_name] = avg
+        max_contribution[layer_name] = max
+        
+        print(layer_name, max.shape, max)
+        
+    return avg_contribution, max_contribution
     
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
