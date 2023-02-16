@@ -69,7 +69,6 @@ class NodeAttributor:
             
             # Transformer blocks
             for block_id in reversed(range(self.num_blocks)):
-                print(block_id)
                 block_id = str(block_id)
                 calculate.transformer_block_contributions(block_id)
                 
@@ -167,6 +166,9 @@ class SequenceContributionCalculator:
         # Each column in contribution contains one input node's weights to every output node
         # w_xy * w_yz * delta_x and sum(w_xy * w_yz * delta_x) over all y
         contributions = torch.mul(self.weight_product_sum, activations)
+        sum_contributions = torch.sum(contributions, -1, keepdim=True).expand(self.batch_size, self.seq_length, input_size)
+        print(sum_contributions)
+        contributions = torch.div(contributions, sum_contributions)
         
         return contributions
     
@@ -200,6 +202,9 @@ class SequenceContributionCalculator:
         fused_qkv_weight_product_sum = torch.cat([query_weight_product_sum, key_weight_product_sum, value_weight_product_sum], -2)
         fused_qkv_contributions = fused_qkv_contributions.view(self.batch_size, self.seq_length, self.num_heads * 3 * self.head_dim)
         fused_qkv_weight_product_sum = fused_qkv_weight_product_sum.view(self.batch_size, self.seq_length, self.num_heads * 3 * self.head_dim).squeeze()
+        
+        sum_fused_qkv_contributions = torch.sum(fused_qkv_contributions, -1, keepdim=True).expand(self.batch_size, self.seq_length, self.num_heads * 3 * self.head_dim)
+        fused_qkv_contributions = torch.div(fused_qkv_contributions, sum_fused_qkv_contributions)
         
         param_name = f"transformer.h.{block_id}.self_attention.query_key_value_fused_output.weight"
         self.contributions.append((param_name, fused_qkv_contributions))
@@ -250,7 +255,7 @@ class SequenceContributionCalculator:
         # If I element wise multiplied the value layer and this current weight product sum, 
         # it gives the value layer output's contribution to the final prediction.
         value_contributions = torch.mul(value_layer_activations, value_weight_product_sum)
-        
+
         return value_contributions, value_weight_product_sum
     
     
@@ -325,12 +330,14 @@ class SequenceContributionCalculator:
         key_weight_product_sum = torch.sum(key_weight_product, 2)
         key_contributions = torch.mul(key_activations, key_weight_product_sum)
         
-        return key_contributions, key_weight_product_sum 
+        return key_contributions, key_weight_product_sum
+
 
   
 def main(model_size, data):
     attributor = NodeAttributor(model_size)
     contributions = attributor.calc_node_contributions(data)
+    #print(contributions[0][30])
     #print(contributions)
     
     
