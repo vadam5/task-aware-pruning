@@ -61,8 +61,7 @@ class BloomAttentionForNodeAttribution(BloomAttention):
         
         # 3 x [batch_size, seq_length, num_heads, head_dim]
         (query_layer, key_layer, value_layer) = self._split_heads(fused_qkv)
-        
-        
+
         batch_size, q_length, _, _ = query_layer.shape
 
         query_layer = query_layer.transpose(1, 2).reshape(batch_size * self.num_heads, q_length, self.head_dim)
@@ -107,6 +106,7 @@ class BloomAttentionForNodeAttribution(BloomAttention):
         attn_weights = torch.masked_fill(attention_scores, attention_mask, torch.finfo(attention_scores.dtype).min)
         activations["query_key_attn_weights"] = attn_weights
         attention_probs = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(input_dtype)
+        activations["attention_probs"] = attention_probs
 
         # [batch_size, num_heads, q_length, kv_length]
         attention_probs = self.attention_dropout(attention_probs)

@@ -85,8 +85,24 @@ class SequenceContributionCalculator:
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.contributions = []
-        self.weight_product_sum = None
+        self.prev_normalized_contributions = None
         self.batch_size = 1
+        
+    def update_prev_normalized_contributions(self, contributions):
+        contributions = contributions.squeeze()
+        contributions_dim = contributions.shape[-1]
+        contributions_max = torch.max(contributions, -1).values
+        contributions_min = torch.min(contributions, -1).values
+        min_max_diff = torch.sub(contributions_max, contributions_min)
+        
+        expanded_contributions_min = contributions_min.unsqueeze(-1).expand(self.seq_length, contributions_dim)
+        expanded_min_max_diff = min_max_diff.unsqueeze(-1).expand(self.seq_length, contributions_dim)
+
+        contributions_minus_min = torch.sub(contributions, expanded_contributions_min)
+        result = torch.div(contributions_minus_min, expanded_min_max_diff)
+        
+        return result
+        
                
     def lm_head_contributions(self):
         """Final hidden states to token logit contributions"""
@@ -104,6 +120,7 @@ class SequenceContributionCalculator:
         # Contribution of layer normed final hidden states to token logit
         contributions = torch.mul(seq_token_weights, hidden_state_activations)
         self.contributions.append((param_name, contributions))
+        self.prev_normalized_contributions = self.update_prev_normalized_contributions(contributions)
         self.weight_product_sum = seq_token_weights
         
     def transformer_block_contributions(self, block_id):
@@ -149,26 +166,24 @@ class SequenceContributionCalculator:
         weights = weights.expand(self.seq_length, output_size, input_size)
         
         # w_yz
-        weight_product_sum = self.weight_product_sum.unsqueeze(-1)
-        weight_product_sum = weight_product_sum.expand(self.seq_length, output_size, input_size)
+        prev_contributions = self.prev_normalized_contributions.unsqueeze(-1)
+        prev_contributions = prev_contributions.expand(self.seq_length, output_size, input_size)
         
         # Multiply current layer weights with previous layer weights, w_xy * w_yz
         # Element-wise multiply each column by the output layer's weights to the final layer to get 
         # input layer's contribution to final prediction
-        weight_product = torch.mul(weights, weight_product_sum)
+        weight_product = torch.mul(weights, prev_contributions)
         
         # Sum over column's elements (aka all weights from one input node to all output nodes) to 
         # have weight matrix for next layer
         # sum(w_xy * w_yz) over all y, used for next computation
-        self.weight_product_sum = torch.sum(weight_product, 1)
+        weight_product_sum = torch.sum(weight_product, 1)
         
         # Element-wise multiply each weight row by the input node's activation
         # Each column in contribution contains one input node's weights to every output node
         # w_xy * w_yz * delta_x and sum(w_xy * w_yz * delta_x) over all y
-        contributions = torch.mul(self.weight_product_sum, activations)
-        sum_contributions = torch.sum(contributions, -1, keepdim=True).expand(self.batch_size, self.seq_length, input_size)
-        print(sum_contributions)
-        contributions = torch.div(contributions, sum_contributions)
+        contributions = torch.mul(weight_product_sum, activations)
+        self.prev_normalized_contributions = self.update_prev_normalized_contributions(contributions)
         
         return contributions
     
@@ -180,35 +195,25 @@ class SequenceContributionCalculator:
         merged_atten_head_contributions = self.feed_forward_contributions(block_id, sub_block, layer_name, param_name)
         self.contributions.append((param_name, merged_atten_head_contributions))
         
-        value_contributions, value_weight_product_sum = self.value_layer_contributions(block_id)
-        query_key_attn_weight_product_sum = self.query_key_atten_contributions(block_id)
-        query_contributions, query_weight_product_sum = self.query_layer_contributions(block_id, query_key_attn_weight_product_sum)
-        key_contributions, key_weight_product_sum = self.key_layer_contributions(block_id, query_key_attn_weight_product_sum)
+        value_contributions = self.value_layer_contributions(block_id)
+        query_key_attn_contribution = self.query_key_atten_contributions(block_id)
+        query_contributions = self.query_layer_contributions(block_id, query_key_attn_contribution)
+        key_contributions = self.key_layer_contributions(block_id, query_key_attn_contribution)
         
         # Now arrange and combine the key, query, and value weight product sums and contributions
         # to form the weight product sum and contributions for the fused qkv layer output
         # for shape, see https://github.com/huggingface/transformers/blob/820c46a707ddd033975bc3b0549eea200e64c7da/src/transformers/models/bloom/modeling_bloom.py#L297
         query_contributions = query_contributions.unsqueeze(0).transpose(1, 2).unsqueeze(-2)
-        query_weight_product_sum = query_weight_product_sum.unsqueeze(0).transpose(1, 2).unsqueeze(-2)
-
         key_contributions = key_contributions.unsqueeze(0).permute(0, 3, 1, 2).unsqueeze(-2)
-        key_weight_product_sum = key_weight_product_sum.unsqueeze(0).permute(0, 3, 1, 2).unsqueeze(-2)
-
         value_contributions = value_contributions.unsqueeze(0).transpose(1, 2).unsqueeze(-2)
-        value_weight_product_sum = value_weight_product_sum.unsqueeze(0).transpose(1, 2).unsqueeze(-2)
         
         # fuse'em
         fused_qkv_contributions = torch.cat([query_contributions, key_contributions, value_contributions], -2)
-        fused_qkv_weight_product_sum = torch.cat([query_weight_product_sum, key_weight_product_sum, value_weight_product_sum], -2)
         fused_qkv_contributions = fused_qkv_contributions.view(self.batch_size, self.seq_length, self.num_heads * 3 * self.head_dim)
-        fused_qkv_weight_product_sum = fused_qkv_weight_product_sum.view(self.batch_size, self.seq_length, self.num_heads * 3 * self.head_dim).squeeze()
-        
-        sum_fused_qkv_contributions = torch.sum(fused_qkv_contributions, -1, keepdim=True).expand(self.batch_size, self.seq_length, self.num_heads * 3 * self.head_dim)
-        fused_qkv_contributions = torch.div(fused_qkv_contributions, sum_fused_qkv_contributions)
         
         param_name = f"transformer.h.{block_id}.self_attention.query_key_value_fused_output.weight"
         self.contributions.append((param_name, fused_qkv_contributions))
-        self.weight_product_sum = fused_qkv_weight_product_sum
+        self.prev_normalized_contributions = self.update_prev_normalized_contributions(fused_qkv_contributions)
         
         sub_block = "self_attention"
         layer_name = "query_key_value"
@@ -228,13 +233,13 @@ class SequenceContributionCalculator:
 
         # Need to reshape merged head contribution to multiply with attention_probs 
         # and value (layer num heads x seq_length x head dim)
-        value_weight_product_sum = torch.clone(self.weight_product_sum).view(self.seq_length, self.num_heads, self.head_dim)
-        value_weight_product_sum = value_weight_product_sum.transpose(0, 1)
+        prev_contributions = torch.clone(self.prev_normalized_contributions).view(self.seq_length, self.num_heads, self.head_dim)
+        prev_contributions = prev_contributions.transpose(0, 1)
 
         # Need to add an extra dim to the weight product sum because each column 
         # of the attention prob needs to be multiplied by the whole weight product sum
-        value_weight_product_sum = value_weight_product_sum.unsqueeze(1)
-        value_weight_product_sum = value_weight_product_sum.expand(self.num_heads, self.seq_length, self.seq_length, self.head_dim)
+        prev_contributions = prev_contributions.unsqueeze(1)
+        prev_contributions = prev_contributions.expand(self.num_heads, self.seq_length, self.seq_length, self.head_dim)
 
         # Also need to expand attention probs to have final dim=head dim for elementwise multiplication
         expanded_attention_probs = attention_probs.transpose(1, 2)
@@ -246,7 +251,7 @@ class SequenceContributionCalculator:
         # get the weight product some for value layer contribution
         # Need to elementwise multiply (16, 10, 10) each column of this matrix 
         # by each column of the current weight product sum matrix.
-        value_weight_product = torch.mul(value_weight_product_sum, expanded_attention_probs)
+        value_weight_product = torch.mul(prev_contributions, expanded_attention_probs)
 
         # Now we can sum over that extra dim we have. Each column in the most inner 
         # matrix represents one number in the value layer's weight product sum contribution.
@@ -256,15 +261,18 @@ class SequenceContributionCalculator:
         # it gives the value layer output's contribution to the final prediction.
         value_contributions = torch.mul(value_layer_activations, value_weight_product_sum)
 
-        return value_contributions, value_weight_product_sum
+        return value_contributions
     
     
     def query_key_atten_contributions(self, block_id):
         # Value activations are the weights for the query_key atten output
         value_layer_activations = torch.clone(self.model_activations["transformer"]["h"][block_id]["self_attention"]["value_layer"])
+        
+        # Activations need for the previous contributions value
+        query_key_attn_probs = self.model_activations["transformer"]["h"][block_id]["self_attention"]["attention_probs"]
 
         # Same reshaping that was needed for the value contribution calculation
-        query_key_attn_weight_product_sum = torch.clone(self.weight_product_sum).view(self.seq_length, self.num_heads, self.head_dim)
+        query_key_attn_weight_product_sum = torch.clone(self.prev_normalized_contributions).view(self.seq_length, self.num_heads, self.head_dim)
         query_key_attn_weight_product_sum = query_key_attn_weight_product_sum.transpose(0, 1)
 
         # Need to multiply each row in the product sum by every row in the value weight matrix, 
@@ -283,10 +291,16 @@ class SequenceContributionCalculator:
         # Sum over the head_dim dimension, which in this case, can be thought of as the the output dimension
         query_key_attn_weight_product_sum = torch.sum(query_key_attn_weight_product, -1)
         
-        return query_key_attn_weight_product_sum
+        # Multiplying by the query key activations gives the query key contribution. Don't actually need these contriution values though.
+        query_key_attn_contribution = torch.mul(query_key_attn_probs.squeeze(), query_key_attn_weight_product_sum)
+        query_key_attn_contribution = query_key_attn_contribution.transpose(0, 1).reshape(self.seq_length, self.seq_length * self.num_heads)
+        query_key_attn_contribution = self.update_prev_normalized_contributions(query_key_attn_contribution)
+        query_key_attn_contribution = query_key_attn_contribution.reshape(self.seq_length, self.num_heads, self.seq_length).transpose(0, 1)
+        
+        return query_key_attn_contribution
     
     
-    def query_layer_contributions(self, block_id, query_key_attn_weight_product_sum):
+    def query_layer_contributions(self, block_id, query_key_attn_contribution):
         """Query contributions to query_key attention weights"""
         
         # The key activations are the query's weights when calcualting the query contibution
@@ -294,7 +308,7 @@ class SequenceContributionCalculator:
         query_activations = self.model_activations["transformer"]["h"][block_id]["self_attention"]["query_layer"]
     
         # Treat this weight product sum like I treated the weight product sum in query_key_attn_weight_product_sum
-        query_weight_product_sum = torch.clone(query_key_attn_weight_product_sum).unsqueeze(2)
+        query_weight_product_sum = torch.clone(query_key_attn_contribution).unsqueeze(2)
         query_weight_product_sum = query_weight_product_sum.expand(self.num_heads, self.seq_length, self.head_dim, self.seq_length)
 
         # Treat the key activations like I treated the value activations when calculating the query_key_attn_weight_product_sum
@@ -308,10 +322,10 @@ class SequenceContributionCalculator:
         # Treat the query activations like I treated the query_key_attn activations
         query_contributions = torch.mul(query_activations, query_weight_product_sum)
         
-        return query_contributions, query_weight_product_sum
+        return query_contributions
     
     
-    def key_layer_contributions(self, block_id, query_key_attn_weight_product_sum):
+    def key_layer_contributions(self, block_id, query_key_attn_contribution):
         """Key contributions to the query_key attention weights"""
         
         # The query activations are the key's weights when calcualting the key contibution
@@ -319,7 +333,7 @@ class SequenceContributionCalculator:
         key_activations = self.model_activations["transformer"]["h"][block_id]["self_attention"]["key_layer"]
         
         # Treat key matrix like value matrix when calculating value contribution
-        key_weight_product_sum = torch.clone(query_key_attn_weight_product_sum).unsqueeze(1)
+        key_weight_product_sum = torch.clone(query_key_attn_contribution).unsqueeze(1)
         key_weight_product_sum = key_weight_product_sum.expand(self.num_heads, self.head_dim, self.seq_length, self.seq_length)
 
         expanded_query_activations = query_activations.transpose(1, 2)
@@ -330,15 +344,15 @@ class SequenceContributionCalculator:
         key_weight_product_sum = torch.sum(key_weight_product, 2)
         key_contributions = torch.mul(key_activations, key_weight_product_sum)
         
-        return key_contributions, key_weight_product_sum
+        return key_contributions
 
 
   
 def main(model_size, data):
     attributor = NodeAttributor(model_size)
     contributions = attributor.calc_node_contributions(data)
-    #print(contributions[0][30])
-    #print(contributions)
+    
+    print(contributions)
     
     
 if __name__ == "__main__":
