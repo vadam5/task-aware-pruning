@@ -1,10 +1,11 @@
 import logging
 import time
 import torch
+from collections import OrderedDict
 
 from transformers import AutoTokenizer, BloomForCausalLM
-from bloom_for_node_attribution import BloomForCausalLMForNodeAttribution
-from utils import count_params
+from node_attribution.bloom_for_node_attribution import BloomForCausalLMForNodeAttribution
+from node_attribution.utils import count_params
 
 class NodeAttributor:
     def __init__(self, model_size):
@@ -25,7 +26,7 @@ class NodeAttributor:
         self.head_dim = self.hidden_size // self.num_heads
         self.model_params = self.model.state_dict()
         
-        logging.info(f"Finished loading bigscience/bloom-{model_size}.\n\
+        print(f"Finished loading bigscience/bloom-{model_size}.\n\
                     Num Transformer Blocks: {self.num_blocks}\n\
                     Num Attention Heads: {self.num_heads}\n\
                     Head Dim: {self.head_dim}\n\
@@ -346,12 +347,12 @@ class SequenceContributionCalculator:
         
         return key_contributions
   
-def main(model_size, data):
+def get_attributions(model_size, data):
     attributor = NodeAttributor(model_size)
     contributions = attributor.calc_node_contributions(data)[0]
     
-    avg_contribution = {}
-    max_contribution = {}
+    avg_contribution = OrderedDict()
+    max_contribution = OrderedDict()
     
     # Get average and max contributions for each node over the whole sequence
     for layer in contributions:
@@ -362,13 +363,11 @@ def main(model_size, data):
         avg_contribution[layer_name] = avg
         max_contribution[layer_name] = max
         
-        print(layer_name, max.shape, max)
-        
-    return avg_contribution, max_contribution
+    return avg_contribution, max_contribution, attributor.model, attributor.model_params
     
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     
     model_size = "560m"
     data = ["Hello, I am an AlexPrize chatbot"]
-    main(model_size, data)
+    get_attributions(model_size, data)

@@ -12,8 +12,8 @@ from transformers.models.bloom.modeling_bloom import BloomAttention, BloomBlock,
 from transformers.models.bloom.modeling_bloom import build_alibi_tensor, dropout_add
 from transformers.models.bloom.configuration_bloom import BloomConfig
 
-from outputs_for_node_attribution import BloomOutputForNodeAttribution, CausalLMOutputForNodeAttribution
-from generation_utils_for_node_attribution import GenerationMixinForNodeAttribution
+from node_attribution.outputs_for_node_attribution import BloomOutputForNodeAttribution, CausalLMOutputForNodeAttribution
+from node_attribution.generation_utils_for_node_attribution import GenerationMixinForNodeAttribution
 
 
 
