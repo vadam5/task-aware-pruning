@@ -8,7 +8,7 @@ from torch.nn import functional as F
 from typing import Dict, Optional, Tuple, Union
 
 from transformers import BloomForCausalLM
-from transformers.models.bloom.modeling_bloom import BloomAttention, BloomBlock, BloomMLP,  BloomModel, BloomPreTrainedModel
+from transformers.models.bloom.modeling_bloom import BloomAttention, BloomBlock, BloomMLP,  BloomModel
 from transformers.models.bloom.modeling_bloom import build_alibi_tensor, dropout_add
 from transformers.models.bloom.configuration_bloom import BloomConfig
 

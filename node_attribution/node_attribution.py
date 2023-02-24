@@ -3,7 +3,7 @@ import time
 import torch
 from collections import OrderedDict
 
-from transformers import AutoTokenizer, BloomForCausalLM
+from transformers import AutoTokenizer
 from node_attribution.bloom_for_node_attribution import BloomForCausalLMForNodeAttribution
 from node_attribution.utils import count_params
 
