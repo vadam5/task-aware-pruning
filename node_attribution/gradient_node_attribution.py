@@ -4,11 +4,11 @@ import torch
 from collections import OrderedDict
 
 from transformers import AutoTokenizer
-# from node_attribution.bloom_for_gradient_node_attribution import BloomForCausalLMForNodeAttribution
-# from node_attribution.utils import count_params
+from node_attribution.bloom_for_gradient_node_attribution import BloomForCausalLMForNodeAttribution
+from node_attribution.utils import count_params
 
-from bloom_for_gradient_node_attribution import BloomForCausalLMForNodeAttribution
-from utils import count_params
+# from bloom_for_gradient_node_attribution import BloomForCausalLMForNodeAttribution
+# from utils import count_params
 
 
 class NodeAttributor:
@@ -39,37 +39,52 @@ class NodeAttributor:
                     Total Param Count (w/ LM Head): {self.total_params:,}"
         )
 
-    def forward_pass(self, line):
-        inputs = self.tokenizer(line, return_tensors="pt")
-        outputs = self.model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], return_dict=True)
+    def forward_pass(self, inputs, atten_mask):
+        outputs = self.model(input_ids=inputs, attention_mask=atten_mask, return_dict=True)
         
-        return outputs, inputs["input_ids"][0]
+        return outputs
 
     def calc_node_contributions(self, data):
         contributions = []
         
         for line in data:
-            # self.forward_pass(line)
-            contributions_to_line = []
-            outputs, input_ids = self.forward_pass(line)
-            print(outputs.keys())
-            last_token_index = len(input_ids) - 1
-            last_token = input_ids[last_token_index]
-            first_token = input_ids[0]
+            contributions_to_line = {}
+            inputs = self.tokenizer(line, return_tensors="pt")
+            atten_mask = inputs['attention_mask']
+            input_ids = inputs['input_ids']
             
-            outputs[0][last_token_index][last_token].backward()
+            for i in range(len(input_ids[0])):
+                token_id = input_ids[0][i].item()
+                input_upto_index = torch.index_select(input_ids, 1, torch.tensor([j for j in range(i + 1)]))
+                atten_mask_upto_index = torch.index_select(atten_mask, 1, torch.tensor([j for j in range(i + 1)]))
+                outputs_upto_index = self.model(input_ids=input_upto_index, attention_mask=atten_mask_upto_index, return_dict=True)
+                outputs_upto_index.logits[0][i][token_id].backward()
             
-            for block_id in range(self.num_blocks):
-                dense_4h_to_h_gradients = self.model.transformer.h[block_id].mlp.dense_4h_to_h_activations.grad[0]
-                mlp_param_name = f"transformer.h.{block_id}.mlp.dense_4h_to_h.weight"
-                contributions_to_line.append((mlp_param_name, dense_4h_to_h_gradients))
-                
-                # print(self.model.transformer.h[block_id].self_attention.query_key_value_activations.grad)
-                # query_key_value_output_gradients = self.model.transformer.h[block_id].self_attention.query_key_value_output_activations.grad[0]
-                # print(query_key_value_output_gradients.shape)
-                # qkv_param_name = f"transformer.h.{block_id}.self_attention.query_key_value_fused_output.weight"
-                # contributions_to_line.append((qkv_param_name, query_key_value_output_gradients))
+                for block_id in range(self.num_blocks):
+                    dense_4h_to_h_gradients = torch.mean(self.model.transformer.h[block_id].mlp.dense_4h_to_h_activations.grad[0], 0)
+                    mlp_param_name = f"transformer.h.{block_id}.mlp.dense_4h_to_h.weight"
                     
+                    if mlp_param_name not in contributions_to_line:
+                        contributions_to_line[mlp_param_name] = []
+                    
+                    contributions_to_line[mlp_param_name].append(dense_4h_to_h_gradients)
+                    
+                    weighted_value_layer_gradients = torch.mean(self.model.transformer.h[block_id].self_attention.dense_activations.grad[0], 0)
+                    # tiled_weighted_value_layer_gradients = torch.tile(weighted_value_layer_gradients, (3,))
+                    qkv_param_name = f"transformer.h.{block_id}.self_attention.value_layer.weight"
+                    
+                    if qkv_param_name not in contributions_to_line:
+                        contributions_to_line[qkv_param_name] = []
+                    
+                    contributions_to_line[qkv_param_name].append(weighted_value_layer_gradients)
+                    
+                    # print(self.model.transformer.h[block_id].self_attention.query_key_value_activations.grad)
+                    # query_key_value_output_gradients = self.model.transformer.h[block_id].self_attention.query_key_value_output_activations.grad[0]
+                    # print(query_key_value_output_gradients.shape)
+                    # qkv_param_name = f"transformer.h.{block_id}.self_attention.query_key_value_fused_output.weight"
+                    # contributions_to_line.append((qkv_param_name, query_key_value_output_gradients))
+                       
+            contributions_to_line = [(key, torch.stack(value)) for key, value in contributions_to_line.items()]
             contributions.append(contributions_to_line)
                 
         return contributions
@@ -87,13 +102,11 @@ def get_attributions(model_size, data):
         layer_name, full_seq_contributions = layer
         avg = torch.mean(full_seq_contributions.squeeze(), 0)
         max = torch.max(full_seq_contributions.squeeze(), 0).values
-        final  = full_seq_contributions.squeeze()[-1]
         
         avg_contribution[layer_name] = avg
         max_contribution[layer_name] = max
-        final_contribution[layer_name] = final
         
-    return avg_contribution, max_contribution, final_contribution, attributor.model, attributor.model_params
+    return avg_contribution, max_contribution, attributor.model, attributor.model_params
     
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
