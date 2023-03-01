@@ -68,21 +68,6 @@ class NodeAttributor:
                         contributions_to_line[mlp_param_name] = []
                     
                     contributions_to_line[mlp_param_name].append(dense_4h_to_h_gradients)
-                    
-                    weighted_value_layer_gradients = torch.mean(self.model.transformer.h[block_id].self_attention.dense_activations.grad[0], 0)
-                    # tiled_weighted_value_layer_gradients = torch.tile(weighted_value_layer_gradients, (3,))
-                    qkv_param_name = f"transformer.h.{block_id}.self_attention.value_layer.weight"
-                    
-                    if qkv_param_name not in contributions_to_line:
-                        contributions_to_line[qkv_param_name] = []
-                    
-                    contributions_to_line[qkv_param_name].append(weighted_value_layer_gradients)
-                    
-                    # print(self.model.transformer.h[block_id].self_attention.query_key_value_activations.grad)
-                    # query_key_value_output_gradients = self.model.transformer.h[block_id].self_attention.query_key_value_output_activations.grad[0]
-                    # print(query_key_value_output_gradients.shape)
-                    # qkv_param_name = f"transformer.h.{block_id}.self_attention.query_key_value_fused_output.weight"
-                    # contributions_to_line.append((qkv_param_name, query_key_value_output_gradients))
                        
             contributions_to_line = [(key, torch.stack(value)) for key, value in contributions_to_line.items()]
             contributions.append(contributions_to_line)
