@@ -11,7 +11,7 @@ from node_attribution.utils import count_params
 # from utils import count_params
 
 
-class NodeAttributor:
+class BloomNodeAttributor:
     def __init__(self, model_size):
         self.load_bloom_model(model_size)
 
@@ -45,10 +45,12 @@ class NodeAttributor:
         return outputs
 
     def calc_node_contributions(self, data):
-        contributions = []
+        contributions = {}
+        line_num = 1
         
         for line in data:
-            contributions_to_line = {}
+            print(line_num)
+            line_num += 1
             inputs = self.tokenizer(line, return_tensors="pt")
             atten_mask = inputs['attention_mask']
             input_ids = inputs['input_ids']
@@ -64,29 +66,26 @@ class NodeAttributor:
                     dense_4h_to_h_gradients = torch.mean(self.model.transformer.h[block_id].mlp.dense_4h_to_h_activations.grad[0], 0)
                     mlp_param_name = f"transformer.h.{block_id}.mlp.dense_4h_to_h.weight"
                     
-                    if mlp_param_name not in contributions_to_line:
-                        contributions_to_line[mlp_param_name] = []
+                    if mlp_param_name not in contributions:
+                        contributions[mlp_param_name] = []
                     
-                    contributions_to_line[mlp_param_name].append(dense_4h_to_h_gradients)
+                    contributions[mlp_param_name].append(dense_4h_to_h_gradients)
                        
-            contributions_to_line = [(key, torch.stack(value)) for key, value in contributions_to_line.items()]
-            contributions.append(contributions_to_line)
-                
+        contributions = [(key, torch.stack(value)) for key, value in contributions.items()]
         return contributions
   
 def get_attributions(model_size, data):
-    attributor = NodeAttributor(model_size)
-    contributions = attributor.calc_node_contributions(data)[0]
+    attributor = BloomNodeAttributor(model_size)
+    contributions = attributor.calc_node_contributions(data)
     
     avg_contribution = OrderedDict()
     max_contribution = OrderedDict()
-    final_contribution = OrderedDict()
     
     # Get average and max contributions for each node over the whole sequence
     for layer in contributions:
         layer_name, full_seq_contributions = layer
-        avg = torch.mean(full_seq_contributions.squeeze(), 0)
-        max = torch.max(full_seq_contributions.squeeze(), 0).values
+        avg = torch.mean(full_seq_contributions, dim=0)
+        max = torch.amax(full_seq_contributions, dim=0).values
         
         avg_contribution[layer_name] = avg
         max_contribution[layer_name] = max
@@ -97,5 +96,5 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     
     model_size = "560m"
-    data = ["Hello, I am an AlexPrize chatbot"]
+    data = ["Hello, I am an AlexPrize chatbot", "This is a second sentence"]
     get_attributions(model_size, data)
