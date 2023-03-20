@@ -1,5 +1,6 @@
 import logging
 import warnings
+import math
 import torch
 
 import torch.nn as nn
@@ -51,6 +52,50 @@ class BloomMLPForNodeAttribution(BloomMLP):
 
 
 class BloomAttentionForNodeAttribution(BloomAttention):
+    def __init__(self, config):
+        super(config).__init__()
+
+        self.pretraining_tp = config.pretraining_tp
+        self.slow_but_exact = config.slow_but_exact
+
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.n_head
+        self.head_dim = self.hidden_size // self.num_heads
+        self.split_size = self.hidden_size
+        self.hidden_dropout = config.hidden_dropout
+
+        if self.head_dim * self.num_heads != self.hidden_size:
+            raise ValueError(
+                f"`hidden_size` must be divisible by num_heads (got `hidden_size`: {self.hidden_size} and `num_heads`:"
+                f" {self.num_heads})."
+            )
+
+        # Layer-wise attention scaling
+        self.inv_norm_factor = 1.0 / math.sqrt(self.head_dim)
+        self.beta = 1.0
+
+        #self.query_key_value = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=True)
+        self.query_key = nn.Linear(self.hidden_size, 2 * self.hidden_size, bias=True)
+        self.value = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
+        self.dense = nn.Linear(self.hidden_size, self.hidden_size)
+        self.attention_dropout = nn.Dropout(config.attention_dropout)
+        
+    def _split_heads(self, fused_qk, v):
+        """
+        Split the last dimension into (num_heads, head_dim) without making any copies, results share same memory
+        storage as `fused_qkv`
+        Args:
+            fused_qkv (`torch.tensor`, *required*): [batch_size, seq_length, num_heads * 3 * head_dim]
+        Returns:
+            query: [batch_size, seq_length, num_heads, head_dim] key: [batch_size, seq_length, num_heads, head_dim]
+            value: [batch_size, seq_length, num_heads, head_dim]
+        """
+        batch_size, seq_length, two_times_hidden_size = fused_qk.shape
+        fused_qk = fused_qk.view(batch_size, seq_length, self.num_heads, 2, self.head_dim)
+        v = v.view(batch_size, seq_length, self.num_heads, 1, self.head_dim)
+        
+        return fused_qk[..., 0, :], fused_qk[..., 1, :], v
+    
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -67,11 +112,14 @@ class BloomAttentionForNodeAttribution(BloomAttention):
         hidden_states.retain_grad()
         self.query_key_value_activations = hidden_states
         activations["query_key_value"] = hidden_states # For node attribution
-        fused_qkv = self.query_key_value(hidden_states) # [batch_size, seq_length, 3 x hidden_size]
-        self.query_key_value_output_activations = fused_qkv
+        fused_qk = self.query_key(hidden_states)
+        v = self.value(hidden_states)
+        #fused_qkv = self.query_key_value(hidden_states) # [batch_size, seq_length, 3 x hidden_size]
+        #self.query_key_value_output_activations = fused_qkv
         
         # 3 x [batch_size, seq_length, num_heads, head_dim]
-        (query_layer, key_layer, value_layer) = self._split_heads(fused_qkv)
+        #(query_layer, key_layer, value_layer) = self._split_heads(fused_qkv)
+        (query_layer, key_layer, value_layer) = self._split_heads(fused_qk, v)
 
         batch_size, q_length, _, _ = query_layer.shape
 
