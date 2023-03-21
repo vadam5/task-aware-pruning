@@ -53,7 +53,7 @@ class BloomMLPForNodeAttribution(BloomMLP):
 
 class BloomAttentionForNodeAttribution(BloomAttention):
     def __init__(self, config):
-        nn.Module.__init__(self, )
+        super(config).__init__()
 
         self.pretraining_tp = config.pretraining_tp
         self.slow_but_exact = config.slow_but_exact
@@ -74,10 +74,7 @@ class BloomAttentionForNodeAttribution(BloomAttention):
         self.inv_norm_factor = 1.0 / math.sqrt(self.head_dim)
         self.beta = 1.0
 
-        #self.query_key_value = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=True)
-        #self.query_key_value = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=True)
-        self.query_key = nn.Linear(self.hidden_size, 2 * self.hidden_size, bias=True)
-        self.value = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
+        self.query_key_value = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=True)
         self.dense = nn.Linear(self.hidden_size, self.hidden_size)
         self.attention_dropout = nn.Dropout(config.attention_dropout)
         
@@ -112,21 +109,12 @@ class BloomAttentionForNodeAttribution(BloomAttention):
         
         hidden_states.retain_grad()
         self.query_key_value_activations = hidden_states
-        # activations["query_key_value"] = hidden_states # For node attribution
-        
-        fused_qk = self.query_key(hidden_states)
-        fused_qk.retain_grad()
-        self.qk_activations = fused_qk
-        
-        v = self.value(hidden_states)
-        v.retain_grad()
-        self.value_activations = v
-        #fused_qkv = self.query_key_value(hidden_states) # [batch_size, seq_length, 3 x hidden_size]
-        #self.query_key_value_output_activations = fused_qkv
+        activations["query_key_value"] = hidden_states # For node attribution
+        fused_qkv = self.query_key_value(hidden_states) # [batch_size, seq_length, 3 x hidden_size]
+        self.query_key_value_output_activations = fused_qkv
         
         # 3 x [batch_size, seq_length, num_heads, head_dim]
-        #(query_layer, key_layer, value_layer) = self._split_heads(fused_qkv)
-        (query_layer, key_layer, value_layer) = self._split_heads(fused_qk, v)
+        (query_layer, key_layer, value_layer) = self._split_heads(fused_qkv)
 
         batch_size, q_length, _, _ = query_layer.shape
 

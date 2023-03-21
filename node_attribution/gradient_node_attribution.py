@@ -3,8 +3,7 @@ import time
 import torch
 from collections import OrderedDict
 
-from transformers import AutoTokenizer, BloomForCausalLM
-from transformers.models.bloom.configuration_bloom import BloomConfig
+from transformers import AutoTokenizer
 from node_attribution.bloom_for_gradient_node_attribution import BloomForCausalLMForNodeAttribution
 from node_attribution.utils import count_params
 
@@ -18,8 +17,9 @@ class BloomNodeAttributor:
 
     def load_bloom_model(self, model_size):
         logging.info(f"Starting to load bigscience/bloom-{model_size} ...")
-        self.model = self.load_split_qk_and_v_model(model_size)    
+        
         self.tokenizer = AutoTokenizer.from_pretrained(f"bigscience/bloom-{model_size}")
+        self.model = BloomForCausalLMForNodeAttribution.from_pretrained(f"bigscience/bloom-{model_size}")
         
         logging.info(f"bigscience/bloom-{model_size} loaded, counting params and calculating variables ...")
         
@@ -38,69 +38,6 @@ class BloomNodeAttributor:
                     Base Model Param Count: {self.base_params:,}\n\
                     Total Param Count (w/ LM Head): {self.total_params:,}"
         )
-        
-    def load_split_qk_and_v_model(self, size):
-        temp_model = BloomForCausalLM.from_pretrained(f"bigscience/bloom-{size}")
-        temp_model_statedict = temp_model.state_dict()
-        hidden_size = temp_model.config.hidden_size
-        new_state_dict = OrderedDict()
-        
-        qk_index = torch.tensor([i for i in range(hidden_size * 2)])
-        v_index = torch.tensor([i for i in range(hidden_size * 2, hidden_size * 3)])
-
-        for layer_name in temp_model_statedict:
-            if "query_key_value" in layer_name:
-                qk_name = layer_name.replace("query_key_value", "query_key")
-                v_name = layer_name.replace("query_key_value", "value")
-                
-                qkv_weights = temp_model_statedict[layer_name]
-                
-                qk_weights = torch.index_select(qkv_weights, 0, qk_index)
-                new_state_dict[qk_name] = qk_weights
-                
-                if "bias" in layer_name:
-                    prev_v_weights = layer_name.replace("query_key_value.bias", "value.weight")
-                    new_state_dict.move_to_end(prev_v_weights)
-                
-                v_weights = torch.index_select(qkv_weights, 0, v_index)
-                new_state_dict[v_name] = v_weights
-                
-                
-            else:
-                layer_value = temp_model_statedict[layer_name]
-                new_state_dict[layer_name] = layer_value
-                
-        bloom_config = BloomConfig(
-            vocab_size=250880,
-            hidden_size=1024,
-            n_layer=24,
-            n_head=16,
-            layer_norm_epsilon=1e-5,
-            initializer_range=0.02,
-            use_cache=True,
-            bos_token_id=1,
-            eos_token_id=2,
-            apply_residual_connection_post_layernorm=False,
-            hidden_dropout=0.0,
-            attention_dropout=0.0,
-            pretraining_tp=1,  # TP rank used when training with megatron
-            slow_but_exact=False,
-            attention_softmax_in_fp32=True,
-            bias_dropout_fusion=True,
-            masked_softmax_fusion=True,
-            offset_alibi=100,
-            pad_token_id=3,
-            seq_length=2048,
-            skip_bias_add=True,
-            skip_bias_add_qkv=False,
-            unk_token_id=0,
-            )
-        
-        temp_model = None
-        model = BloomForCausalLMForNodeAttribution(bloom_config)
-        model.load_state_dict(new_state_dict)
-        
-        return model
 
     def forward_pass(self, inputs, atten_mask):
         outputs = self.model(input_ids=inputs, attention_mask=atten_mask, return_dict=True)
@@ -133,22 +70,6 @@ class BloomNodeAttributor:
                         contributions[mlp_param_name] = []
                     
                     contributions[mlp_param_name].append(dense_4h_to_h_gradients)
-                    
-                    value_gradients = torch.mean(self.model.transformer.h[block_id].self_attention.value_activations.grad[0], 0)
-                    value_param_name = f"transformer.h.{block_id}.self_attention.value.weight"
-                    
-                    if value_param_name not in contributions:
-                        contributions[value_param_name] = []
-                        
-                    contributions[value_param_name].append(value_gradients)
-                    
-                    # query_key_gradients = torch.mean(self.model.transformer.h[block_id].self_attention.query_key_activations.grad[0], 0)
-                    # query_key_param_name = f"transformer.h.{block_id}.self_attention.query_key.weight"
-                    
-                    # if query_key_param_name not in contributions:
-                    #     contributions[query_key_param_name] = []
-                        
-                    # contributions[query_key_param_name].append(query_key_gradients)
                        
         contributions = [(key, torch.stack(value)) for key, value in contributions.items()]
         return contributions
