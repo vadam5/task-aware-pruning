@@ -14,6 +14,7 @@ from transformers.models.bloom.configuration_bloom import BloomConfig
 class PrunedBloomAttention(BloomAttention):
     def __init__(self, config: BloomConfig, self_atten_shapes):
         super().__init__(config)
+        print("INIIT Pruned Bloom Attention")
         self.pretraining_tp = config.pretraining_tp
         self.slow_but_exact = config.slow_but_exact
         
@@ -43,6 +44,7 @@ class PrunedBloomAttention(BloomAttention):
 class PrunedBloomMLP(BloomMLP):
     def __init__(self, config: BloomConfig, mlp_shapes):
         super().__init__(config)
+        print("INIT Pruned Bloom MLP")
         self.pretraining_tp = config.pretraining_tp
         self.slow_but_exact = config.slow_but_exact
         
@@ -58,6 +60,7 @@ class PrunedBloomMLP(BloomMLP):
 class PrunedBloomBlock(BloomBlock):
     def __init__(self, config: BloomConfig, block_shapes):
         super().__init__(config)
+        print("INIT pruned bloomn blocks")
         input_layer_norm_size = block_shapes["input_layernorm.weight"][0]
         self.input_layernorm = LayerNorm(input_layer_norm_size, eps=config.layer_norm_epsilon)
         
@@ -79,6 +82,7 @@ class PrunedBloomBlock(BloomBlock):
 class PrunedBloomModel(BloomModel):
     def __init__(self, config: BloomConfig, state_dict_shapes):
         super().__init__(config)
+        print("INIT pruned bloom model")
 
         self.embed_dim = config.hidden_size
         self.num_heads = config.n_head
@@ -110,7 +114,9 @@ class PrunedBloomForCausalLM(BloomForCausalLM):
 
     def __init__(self, config: BloomConfig, state_dict_shapes_path):
         super().__init__(config)
+        print("INIT pruned bloom model for causal LM")
         state_dict_shapes = pkl.load(open(state_dict_shapes_path, "rb"))
+        print("Loaded state dict shapes")
         
         self.transformer = PrunedBloomModel(config, state_dict_shapes)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
